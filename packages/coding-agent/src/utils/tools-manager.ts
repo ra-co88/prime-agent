@@ -185,39 +185,67 @@ async function downloadFile(url: string, dest: string): Promise<void> {
 class UnsupportedToolPlatformError extends Error {}
 
 const MAX_ENTRY_BYTES = 100 * 1024 * 1024;
-async function sha256File(path: string): Promise<string> {
+function isZipSymlink(entry: yauzl.Entry): boolean {
+	const creatorSystem = entry.versionMadeBy >> 8;
+	const unixMode = entry.externalFileAttributes >>> 16;
+	return creatorSystem === 3 && (unixMode & 0o170000) === 0o120000;
+}
+export async function sha256FileForTest(path: string): Promise<string> {
 	const h = createHash("sha256");
 	await pipeline(createReadStream(path), h);
 	return h.digest("hex");
 }
-function extractZipEntry(archive: string, entryName: string, dest: string): Promise<void> {
-	return new Promise((resolve, reject) => {
+async function extractZipEntry(archive: string, entryName: string, dest: string, maxEntryBytes: number): Promise<void> {
+	await new Promise<void>((resolve, reject) => {
 		yauzl.open(archive, { lazyEntries: true, validateEntrySizes: true, strictFileNames: true }, (err, zip) => {
 			if (err || !zip) return reject(err ?? new Error("failed to open zip"));
 			let matches = 0;
-			zip.on("error", reject);
+			const fail = (error: Error) => {
+				zip.close();
+				reject(error);
+			};
+			zip.once("error", reject);
 			zip.on("entry", (entry) => {
 				if (entry.fileName !== entryName) return zip.readEntry();
 				matches++;
-				if (matches > 1 || entry.fileName.endsWith("/") || entry.uncompressedSize > MAX_ENTRY_BYTES)
-					return reject(new Error("invalid pinned zip entry"));
-				zip.openReadStream(entry, (e, stream) => {
-					if (e || !stream) return reject(e ?? new Error("failed to read zip entry"));
+				if (
+					matches > 1 ||
+					entry.fileName.endsWith("/") ||
+					entry.uncompressedSize > maxEntryBytes ||
+					isZipSymlink(entry)
+				)
+					return fail(new Error("invalid pinned zip entry"));
+				zip.openReadStream(entry, (streamError, stream) => {
+					if (streamError || !stream) return fail(streamError ?? new Error("failed to read zip entry"));
 					pipeline(stream, createWriteStream(dest, { flags: "wx", mode: 0o600 })).then(
 						() => zip.readEntry(),
-						reject,
+						(error) => fail(error),
 					);
 				});
 			});
-			zip.on("end", () => (matches === 1 ? resolve() : reject(new Error(`pinned entry not found: ${entryName}`))));
+			zip.once("end", () => (matches === 1 ? resolve() : reject(new Error(`pinned entry not found: ${entryName}`))));
 			zip.readEntry();
 		});
 	});
 }
-async function extractTarEntry(archive: string, entryName: string, dest: string): Promise<void> {
+
+export async function extractZipEntryForTest(
+	archive: string,
+	entryName: string,
+	dest: string,
+	maxEntryBytes = MAX_ENTRY_BYTES,
+): Promise<void> {
+	try {
+		await extractZipEntry(archive, entryName, dest, maxEntryBytes);
+	} catch (error) {
+		await rm(dest, { force: true }).catch(() => undefined);
+		throw error;
+	}
+}
+
+async function extractTarEntry(archive: string, entryName: string, dest: string, maxEntryBytes: number): Promise<void> {
 	const extract = tarStream.extract();
 	let matches = 0;
-	let output: ReturnType<typeof createWriteStream> | undefined;
 	extract.on("entry", (header, stream, next) => {
 		if (header.name !== entryName) {
 			stream.resume();
@@ -225,25 +253,38 @@ async function extractTarEntry(archive: string, entryName: string, dest: string)
 			return;
 		}
 		matches++;
-		if (matches > 1 || header.type !== "file" || (header.size ?? 0) > MAX_ENTRY_BYTES) {
+		if (matches > 1 || header.type !== "file" || (header.size ?? 0) > maxEntryBytes) {
 			stream.resume();
-			extract.destroy(new Error("invalid pinned tar entry"));
+			stream.once("end", () => next(new Error("invalid pinned tar entry")));
 			return;
 		}
-		output = createWriteStream(dest, { flags: "wx", mode: 0o600 });
-		pipeline(stream, output).then(
-			() => next(),
-			(e) => extract.destroy(e),
-		);
-	});
-	const done = new Promise<void>((resolve, reject) => {
-		extract.once("finish", () =>
-			matches === 1 ? resolve() : reject(new Error(`pinned entry not found: ${entryName}`)),
-		);
-		extract.once("error", reject);
+		pipeline(stream, createWriteStream(dest, { flags: "wx", mode: 0o600 })).then(() => next(), next);
 	});
 	await pipeline(createReadStream(archive), createGunzip(), extract);
-	await done;
+	if (matches !== 1) throw new Error(`pinned entry not found: ${entryName}`);
+}
+
+export async function extractTarEntryForTest(
+	archive: string,
+	entryName: string,
+	dest: string,
+	maxEntryBytes = MAX_ENTRY_BYTES,
+): Promise<void> {
+	try {
+		await extractTarEntry(archive, entryName, dest, maxEntryBytes);
+	} catch (error) {
+		await rm(dest, { force: true }).catch(() => undefined);
+		throw error;
+	}
+}
+
+export async function publishVerifiedFileForTest(
+	tempPath: string,
+	binaryPath: string,
+	verify: (path: string) => boolean,
+): Promise<void> {
+	if (!verify(tempPath)) throw new Error("staged binary failed its version check");
+	await rename(tempPath, binaryPath);
 }
 async function downloadTool(tool: ManagedTool): Promise<string> {
 	const config = TOOLS[tool];
@@ -259,12 +300,12 @@ async function downloadTool(tool: ManagedTool): Promise<string> {
 			`https://github.com/${config.repo}/releases/download/${config.repo === "sharkdp/fd" ? "v10.5.0" : "15.2.0"}/${asset.assetName}`,
 			archivePath,
 		);
-		if ((await sha256File(archivePath)) !== asset.sha256) throw new Error(`SHA-256 mismatch for ${asset.assetName}`);
-		if (asset.assetName.endsWith(".zip")) await extractZipEntry(archivePath, asset.entryName, tempPath);
-		else await extractTarEntry(archivePath, asset.entryName, tempPath);
+		if ((await sha256FileForTest(archivePath)) !== asset.sha256)
+			throw new Error(`SHA-256 mismatch for ${asset.assetName}`);
+		if (asset.assetName.endsWith(".zip")) await extractZipEntryForTest(archivePath, asset.entryName, tempPath);
+		else await extractTarEntryForTest(archivePath, asset.entryName, tempPath);
 		if (platform() !== "win32") chmodSync(tempPath, 0o755);
-		if (!commandWorks(tempPath)) throw new Error(`Installed ${config.name} binary failed its version check`);
-		await rename(tempPath, binaryPath);
+		await publishVerifiedFileForTest(tempPath, binaryPath, commandWorks);
 		if (!commandWorks(binaryPath)) throw new Error(`Published ${config.name} binary failed its version check`);
 		return binaryPath;
 	} finally {
