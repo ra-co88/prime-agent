@@ -1,15 +1,18 @@
 import chalk from "chalk";
-import extractZip from "extract-zip";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "fs";
+import { createHash } from "crypto";
+import { chmodSync, createReadStream, createWriteStream, existsSync, mkdirSync } from "fs";
+import { rename, rm } from "fs/promises";
 import { arch, platform } from "os";
 import { join } from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
-import { APP_NAME, getBinDir } from "../config.js";
+import * as tarStream from "tar-stream";
+import * as yauzl from "yauzl";
+import { createGunzip } from "zlib";
+import { getBinDir } from "../config.js";
 import { spawnSyncHidden } from "./child-process.js";
 
 const TOOLS_DIR = getBinDir();
-const NETWORK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const COMMAND_TIMEOUT_MS = 5_000;
 const RIPGREP_INSTALL_URL = "https://github.com/BurntSushi/ripgrep#installation";
@@ -39,36 +42,59 @@ function isOfflineModeEnabled(): boolean {
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
 
+interface PinnedAsset {
+	assetName: string;
+	sha256: string;
+	entryName: string;
+}
 interface ToolConfig {
 	name: string;
-	repo: string; // GitHub repo (e.g., "sharkdp/fd")
-	binaryName: string; // Name of the binary inside the archive
-	systemBinaryNames?: string[]; // Alternative system command names to try before downloading
-	tagPrefix: string; // Prefix for tags (e.g., "v" for v1.0.0, "" for 1.0.0)
-	getAssetName: (version: string, plat: string, architecture: string) => string | null;
+	repo: string;
+	binaryName: string;
+	systemBinaryNames?: string[];
+	getAsset: (plat: string, architecture: string) => PinnedAsset | null;
 }
-
+const pinned = (assetName: string, sha256: string, entryName: string): PinnedAsset => ({
+	assetName,
+	sha256,
+	entryName,
+});
 const TOOLS: Record<string, ToolConfig> = {
 	fd: {
 		name: "fd",
 		repo: "sharkdp/fd",
 		binaryName: "fd",
 		systemBinaryNames: ["fd", "fdfind"],
-		tagPrefix: "v",
-		getAssetName: (version, plat, architecture) => {
-			if (plat === "darwin") {
-				const archStr = architecture === "arm64" ? "aarch64" : architecture === "x64" ? "x86_64" : null;
-				if (!archStr) return null;
-				return `fd-v${version}-${archStr}-apple-darwin.tar.gz`;
-			} else if (plat === "linux") {
-				const archStr = architecture === "arm64" ? "aarch64" : architecture === "x64" ? "x86_64" : null;
-				if (!archStr) return null;
-				return `fd-v${version}-${archStr}-unknown-linux-gnu.tar.gz`;
-			} else if (plat === "win32") {
-				const archStr = architecture === "arm64" ? "aarch64" : architecture === "x64" ? "x86_64" : null;
-				if (!archStr) return null;
-				return `fd-v${version}-${archStr}-pc-windows-msvc.zip`;
-			}
+		getAsset: (p, a) => {
+			const archName = a === "arm64" ? "aarch64" : a === "x64" ? "x86_64" : null;
+			if (!archName) return null;
+			if (p === "darwin")
+				return pinned(
+					`fd-v10.5.0-${archName}-apple-darwin.tar.gz`,
+					{
+						arm64: "b67e1836c468e42e411984b56e52fa7abec08c2bd22c867398e7cc134aac5e12",
+						x64: "7e31028c62c6955877735d0406807aa484c2a5e6f86235a59e26c29c301da590",
+					}[a]!,
+					`fd-v10.5.0-${archName}-apple-darwin/fd`,
+				);
+			if (p === "linux")
+				return pinned(
+					`fd-v10.5.0-${archName}-unknown-linux-gnu.tar.gz`,
+					{
+						arm64: "c0ee43802e3313a317c5af2f4eabd6ba13eeedd595af9775f05e18a13ac4f52c",
+						x64: "a1259cd129636efbc3fef123525c1b49e88fe5088c012630983c310e52fdfa95",
+					}[a]!,
+					`fd-v10.5.0-${archName}-unknown-linux-gnu/fd`,
+				);
+			if (p === "win32")
+				return pinned(
+					`fd-v10.5.0-${archName}-pc-windows-msvc.zip`,
+					{
+						arm64: "a2bcddcfd259b05357a77bbc6cd671fdb30f63fd266a0e748305890a8c5ceaa6",
+						x64: "a227701b8551c35a9931d9f6da75503cf86d88e182d71fb849a70864c5d57cd7",
+					}[a]!,
+					`fd-v10.5.0-${archName}-pc-windows-msvc/fd.exe`,
+				);
 			return null;
 		},
 	},
@@ -76,23 +102,31 @@ const TOOLS: Record<string, ToolConfig> = {
 		name: "ripgrep",
 		repo: "BurntSushi/ripgrep",
 		binaryName: "rg",
-		tagPrefix: "",
-		getAssetName: (version, plat, architecture) => {
-			if (plat === "darwin") {
-				const archStr = architecture === "arm64" ? "aarch64" : architecture === "x64" ? "x86_64" : null;
-				if (!archStr) return null;
-				return `ripgrep-${version}-${archStr}-apple-darwin.tar.gz`;
-			} else if (plat === "linux") {
-				if (architecture === "arm64") {
-					return `ripgrep-${version}-aarch64-unknown-linux-gnu.tar.gz`;
-				}
-				return architecture === "x64" ? `ripgrep-${version}-x86_64-unknown-linux-musl.tar.gz` : null;
-			} else if (plat === "win32") {
-				const archStr = architecture === "arm64" ? "aarch64" : architecture === "x64" ? "x86_64" : null;
-				if (!archStr) return null;
-				return `ripgrep-${version}-${archStr}-pc-windows-msvc.zip`;
-			}
-			return null;
+		getAsset: (p, a) => {
+			const archName = a === "arm64" ? "aarch64" : a === "x64" ? "x86_64" : null;
+			if (!archName) return null;
+			const suffix =
+				p === "darwin"
+					? `${archName}-apple-darwin`
+					: p === "linux"
+						? a === "arm64"
+							? "aarch64-unknown-linux-gnu"
+							: "x86_64-unknown-linux-musl"
+						: p === "win32"
+							? `${archName}-pc-windows-msvc`
+							: null;
+			if (!suffix) return null;
+			const ext = p === "win32" ? "zip" : "tar.gz";
+			const name = `ripgrep-15.2.0-${suffix}.${ext}`;
+			const hashes: Record<string, string> = {
+				"aarch64-apple-darwin": "3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4",
+				"x86_64-apple-darwin": "af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1",
+				"aarch64-unknown-linux-gnu": "a740b91c82eaf9914cfedd353572f2791cbe0162c84101ee0951058f4dcbc90d",
+				"x86_64-unknown-linux-musl": "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c",
+				"aarch64-pc-windows-msvc": "e4abca10c3a64ebea742667dd7009449d49403db5460dd6873e389fa2945360f",
+				"x86_64-pc-windows-msvc": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
+			};
+			return pinned(name, hashes[suffix], `ripgrep-15.2.0-${suffix}/rg${p === "win32" ? ".exe" : ""}`);
 		},
 	},
 };
@@ -129,21 +163,6 @@ export function getToolPath(tool: ManagedTool): string | null {
 	return null;
 }
 
-// Fetch latest release version from GitHub
-async function getLatestVersion(repo: string): Promise<string> {
-	const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-		headers: { "User-Agent": `${APP_NAME}-coding-agent` },
-		signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS),
-	});
-
-	if (!response.ok) {
-		throw new Error(`GitHub API error: ${response.status}`);
-	}
-
-	const data = (await response.json()) as { tag_name: string };
-	return data.tag_name.replace(/^v/, "");
-}
-
 // Download a file from URL
 async function downloadFile(url: string, dest: string): Promise<void> {
 	const response = await fetch(url, {
@@ -159,115 +178,99 @@ async function downloadFile(url: string, dest: string): Promise<void> {
 	}
 
 	const fileStream = createWriteStream(dest);
-	await pipeline(Readable.fromWeb(response.body as any), fileStream);
-}
-
-function findBinaryRecursively(rootDir: string, binaryFileName: string): string | null {
-	const stack: string[] = [rootDir];
-
-	while (stack.length > 0) {
-		const currentDir = stack.pop();
-		if (!currentDir) continue;
-
-		const entries = readdirSync(currentDir, { withFileTypes: true });
-		for (const entry of entries) {
-			const fullPath = join(currentDir, entry.name);
-			if (entry.isFile() && entry.name === binaryFileName) {
-				return fullPath;
-			}
-			if (entry.isDirectory()) {
-				stack.push(fullPath);
-			}
-		}
-	}
-
-	return null;
+	await pipeline(Readable.fromWeb(response.body as ReadableStream<Uint8Array>), fileStream);
 }
 
 // Download and install a tool
 class UnsupportedToolPlatformError extends Error {}
 
+const MAX_ENTRY_BYTES = 100 * 1024 * 1024;
+async function sha256File(path: string): Promise<string> {
+	const h = createHash("sha256");
+	await pipeline(createReadStream(path), h);
+	return h.digest("hex");
+}
+function extractZipEntry(archive: string, entryName: string, dest: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		yauzl.open(archive, { lazyEntries: true, validateEntrySizes: true, strictFileNames: true }, (err, zip) => {
+			if (err || !zip) return reject(err ?? new Error("failed to open zip"));
+			let matches = 0;
+			zip.on("error", reject);
+			zip.on("entry", (entry) => {
+				if (entry.fileName !== entryName) return zip.readEntry();
+				matches++;
+				if (matches > 1 || entry.fileName.endsWith("/") || entry.uncompressedSize > MAX_ENTRY_BYTES)
+					return reject(new Error("invalid pinned zip entry"));
+				zip.openReadStream(entry, (e, stream) => {
+					if (e || !stream) return reject(e ?? new Error("failed to read zip entry"));
+					pipeline(stream, createWriteStream(dest, { flags: "wx", mode: 0o600 })).then(
+						() => zip.readEntry(),
+						reject,
+					);
+				});
+			});
+			zip.on("end", () => (matches === 1 ? resolve() : reject(new Error(`pinned entry not found: ${entryName}`))));
+			zip.readEntry();
+		});
+	});
+}
+async function extractTarEntry(archive: string, entryName: string, dest: string): Promise<void> {
+	const extract = tarStream.extract();
+	let matches = 0;
+	let output: ReturnType<typeof createWriteStream> | undefined;
+	extract.on("entry", (header, stream, next) => {
+		if (header.name !== entryName) {
+			stream.resume();
+			stream.once("end", next);
+			return;
+		}
+		matches++;
+		if (matches > 1 || header.type !== "file" || (header.size ?? 0) > MAX_ENTRY_BYTES) {
+			stream.resume();
+			extract.destroy(new Error("invalid pinned tar entry"));
+			return;
+		}
+		output = createWriteStream(dest, { flags: "wx", mode: 0o600 });
+		pipeline(stream, output).then(
+			() => next(),
+			(e) => extract.destroy(e),
+		);
+	});
+	const done = new Promise<void>((resolve, reject) => {
+		extract.once("finish", () =>
+			matches === 1 ? resolve() : reject(new Error(`pinned entry not found: ${entryName}`)),
+		);
+		extract.once("error", reject);
+	});
+	await pipeline(createReadStream(archive), createGunzip(), extract);
+	await done;
+}
 async function downloadTool(tool: ManagedTool): Promise<string> {
 	const config = TOOLS[tool];
 	if (!config) throw new Error(`Unknown tool: ${tool}`);
-
-	const plat = platform();
-	const architecture = arch();
-
-	if (!config.getAssetName("VERSION", plat, architecture)) {
-		throw new UnsupportedToolPlatformError(`Unsupported platform: ${plat}/${architecture}`);
-	}
-
-	// Get latest version and the matching platform asset.
-	const version = await getLatestVersion(config.repo);
-	const assetName = config.getAssetName(version, plat, architecture);
-	if (!assetName) throw new UnsupportedToolPlatformError(`Unsupported platform: ${plat}/${architecture}`);
-
-	// Create tools directory
+	const asset = config.getAsset(platform(), arch());
+	if (!asset) throw new UnsupportedToolPlatformError(`Unsupported platform: ${platform()}/${arch()}`);
 	mkdirSync(TOOLS_DIR, { recursive: true });
-
-	const downloadUrl = `https://github.com/${config.repo}/releases/download/${config.tagPrefix}${version}/${assetName}`;
-	const archivePath = join(TOOLS_DIR, assetName);
-	const binaryExt = plat === "win32" ? ".exe" : "";
-	const binaryPath = join(TOOLS_DIR, config.binaryName + binaryExt);
-
-	// Download
-	await downloadFile(downloadUrl, archivePath);
-
-	// Extract into a unique temp directory. fd and rg downloads can run concurrently
-	// during startup, so sharing a fixed directory causes races.
-	const extractDir = join(
-		TOOLS_DIR,
-		`extract_tmp_${config.binaryName}_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-	);
-	mkdirSync(extractDir, { recursive: true });
-
+	const archivePath = join(TOOLS_DIR, asset.assetName);
+	const binaryPath = join(TOOLS_DIR, config.binaryName + (platform() === "win32" ? ".exe" : ""));
+	const tempPath = `${binaryPath}.${process.pid}.${Date.now()}.part`;
 	try {
-		if (assetName.endsWith(".tar.gz")) {
-			const extractResult = spawnSyncHidden("tar", ["xzf", archivePath, "-C", extractDir], { stdio: "pipe" });
-			if (extractResult.error || extractResult.status !== 0) {
-				const errMsg = extractResult.error?.message ?? extractResult.stderr?.toString().trim() ?? "unknown error";
-				throw new Error(`Failed to extract ${assetName}: ${errMsg}`);
-			}
-		} else if (assetName.endsWith(".zip")) {
-			await extractZip(archivePath, { dir: extractDir });
-		} else {
-			throw new Error(`Unsupported archive format: ${assetName}`);
-		}
-
-		// Find the binary in extracted files. Some archives contain files directly
-		// at root, others nest under a versioned subdirectory.
-		const binaryFileName = config.binaryName + binaryExt;
-		const extractedDir = join(extractDir, assetName.replace(/\.(tar\.gz|zip)$/, ""));
-		const extractedBinaryCandidates = [join(extractedDir, binaryFileName), join(extractDir, binaryFileName)];
-		let extractedBinary = extractedBinaryCandidates.find((candidate) => existsSync(candidate));
-
-		if (!extractedBinary) {
-			extractedBinary = findBinaryRecursively(extractDir, binaryFileName) ?? undefined;
-		}
-
-		if (extractedBinary) {
-			rmSync(binaryPath, { force: true });
-			renameSync(extractedBinary, binaryPath);
-		} else {
-			throw new Error(`Binary not found in archive: expected ${binaryFileName} under ${extractDir}`);
-		}
-
-		// Make executable (Unix only)
-		if (plat !== "win32") {
-			chmodSync(binaryPath, 0o755);
-		}
-		if (!commandWorks(binaryPath)) {
-			rmSync(binaryPath, { force: true });
-			throw new Error(`Installed ${config.name} binary failed its version check`);
-		}
+		await downloadFile(
+			`https://github.com/${config.repo}/releases/download/${config.repo === "sharkdp/fd" ? "v10.5.0" : "15.2.0"}/${asset.assetName}`,
+			archivePath,
+		);
+		if ((await sha256File(archivePath)) !== asset.sha256) throw new Error(`SHA-256 mismatch for ${asset.assetName}`);
+		if (asset.assetName.endsWith(".zip")) await extractZipEntry(archivePath, asset.entryName, tempPath);
+		else await extractTarEntry(archivePath, asset.entryName, tempPath);
+		if (platform() !== "win32") chmodSync(tempPath, 0o755);
+		if (!commandWorks(tempPath)) throw new Error(`Installed ${config.name} binary failed its version check`);
+		await rename(tempPath, binaryPath);
+		if (!commandWorks(binaryPath)) throw new Error(`Published ${config.name} binary failed its version check`);
+		return binaryPath;
 	} finally {
-		// Cleanup
-		rmSync(archivePath, { force: true });
-		rmSync(extractDir, { recursive: true, force: true });
+		await rm(archivePath, { force: true }).catch(() => undefined);
+		await rm(tempPath, { force: true }).catch(() => undefined);
 	}
-
-	return binaryPath;
 }
 
 // Termux package names for tools
