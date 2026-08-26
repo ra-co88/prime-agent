@@ -158,6 +158,7 @@ import type {
 	AgentConnectionResourceDiagnostic,
 	AgentConnectionResourceSnapshot,
 	AgentConnectionRlmChildAgentSnapshot,
+	AgentConnectionSavedSessionScope,
 	AgentConnectionSessionContext,
 	AgentConnectionSessionEvent,
 	AgentConnectionSessionTreeNode,
@@ -896,6 +897,7 @@ export interface InteractiveModeOptions {
 
 export interface InteractiveModeRunResult {
 	type: "agents_view" | "scoped_agents_view";
+	savedSessionScope: AgentConnectionSavedSessionScope;
 	source: Pick<AgentConnectionState, "activeSessionId" | "sessionFile" | "sessionId" | "sessionName" | "cwd">;
 }
 
@@ -954,6 +956,7 @@ export class InteractiveMode {
 	private readonly retainedSubmissionGenerations = new WeakMap<PromptStash, number>();
 	private admitPendingStartupPrompts: (() => Promise<StartupPromptBarrierOutcome>) | undefined;
 	private agentsViewRequest: InteractiveModeRunResult["type"] | undefined;
+	private agentsViewSavedSessionScope: AgentConnectionSavedSessionScope = "all";
 	private loadingAnimation: Loader | undefined = undefined;
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
@@ -1737,6 +1740,7 @@ export class InteractiveMode {
 		const state = this.connectionState;
 		return {
 			type: this.agentsViewRequest ?? "agents_view",
+			savedSessionScope: this.agentsViewSavedSessionScope,
 			source: {
 				activeSessionId: state?.activeSessionId,
 				sessionFile: state?.sessionFile,
@@ -4803,6 +4807,12 @@ export class InteractiveMode {
 					this.echoLocalCommand(text);
 					await this.handleSessionCommand();
 					this.editor.setText("");
+					return;
+				}
+				if (commandName === "sessions" && !commandArgs) {
+					this.editor.setText("");
+					this.agentsViewSavedSessionScope = "current";
+					await this.requestAgentsView();
 					return;
 				}
 				if (commandName === "system-prompt" && !commandArgs) {

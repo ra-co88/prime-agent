@@ -1860,6 +1860,15 @@ describe("InteractiveMode connection events", () => {
 		expect(flushPendingBashComponents).toHaveBeenCalledOnce();
 	});
 
+	test("opens the current-project session browser from /sessions", async () => {
+		const fakeThis = createSubmitHandlerHarness();
+
+		await fakeThis.defaultEditor.onSubmit?.("/sessions");
+
+		expect(fakeThis.requestAgentsView).toHaveBeenCalledOnce();
+		expect(fakeThis.agentConnection.prompt).not.toHaveBeenCalled();
+	});
+
 	test("routes /resume to the resume command handler", async () => {
 		const fakeThis = createSubmitHandlerHarness();
 

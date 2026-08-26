@@ -94,6 +94,7 @@ import {
 } from "./modes/daemon/daemon-worker-protocol.js";
 import {
 	type AgentConnection,
+	type AgentConnectionSavedSessionScope,
 	type AgentsViewScopeKey,
 	ClientPromptStashStore,
 	createInteractiveModeLocalSessionHost,
@@ -1450,7 +1451,11 @@ export async function main(args: string[], options?: MainOptions) {
 			services,
 			sessionManager,
 		});
-		const launchAgentsView = async (initialSession?: SessionSummary, initialScopeKey?: AgentsViewScopeKey) => {
+		const launchAgentsView = async (
+			initialSession?: SessionSummary,
+			initialScopeKey?: AgentsViewScopeKey,
+			savedSessionScope?: AgentConnectionSavedSessionScope,
+		) => {
 			await runAgentsViewMode({
 				socketPath: daemonSocketPath,
 				config: defaultSessionConfig,
@@ -1481,6 +1486,7 @@ export async function main(args: string[], options?: MainOptions) {
 				startupModelId: startupModel.model?.id,
 				initialSession,
 				initialScopeKey,
+				savedSessionScope,
 				verbose: parsed.verbose,
 			});
 		};
@@ -1580,7 +1586,7 @@ export async function main(args: string[], options?: MainOptions) {
 						activeSessionId: interactiveResult.source.activeSessionId,
 					}
 				: undefined;
-		await launchAgentsView(returnedSummary, initialScopeKey);
+		await launchAgentsView(returnedSummary, initialScopeKey, interactiveResult.savedSessionScope);
 		return;
 	}
 	if (useDaemonClient) {

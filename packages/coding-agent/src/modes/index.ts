@@ -25,6 +25,7 @@ export type {
 	AgentConnectionQueueState,
 	AgentConnectionResourceSnapshot,
 	AgentConnectionRlmChildAgentSnapshot,
+	AgentConnectionSavedSessionScope,
 	AgentConnectionSessionEvent,
 	AgentConnectionSlashCommand,
 	AgentConnectionState,

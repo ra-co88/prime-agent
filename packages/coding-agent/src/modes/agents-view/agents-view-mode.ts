@@ -27,7 +27,11 @@ import {
 import { canonicalizePath } from "../../utils/paths.js";
 import { ensureTool } from "../../utils/tools-manager.js";
 import { DaemonAgentConnection } from "../agent-connection/daemon-agent-connection.js";
-import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/types.js";
+import type {
+	AgentConnectionHeartbeat,
+	AgentConnectionSavedSessionInfo,
+	AgentConnectionSavedSessionScope,
+} from "../agent-connection/types.js";
 import { DaemonClient, getDaemonSocketCloseReason } from "../daemon/daemon-client.js";
 import { DaemonSessionRecoveringError } from "../daemon/daemon-errors.js";
 import {
@@ -129,6 +133,9 @@ export interface AgentsViewModeOptions {
 	initialSession?: SessionSummary;
 	/** When set, the first view is rooted at this session's direct children. */
 	initialScopeKey?: AgentsViewScopeKey;
+	/** Scope for the saved-session catalog. "current" lists only sessions in the
+	 *  project directory the client was started in; "all" lists every project. */
+	savedSessionScope?: AgentConnectionSavedSessionScope;
 }
 
 export type AgentsViewRunResult =
@@ -2223,7 +2230,7 @@ export class AgentsViewMode implements Component, Focusable {
 			const sessions = await listDaemonSavedSessions(
 				this.requireClient(),
 				this.getSavedSessionCatalogContext(),
-				"all",
+				this.options.savedSessionScope ?? "all",
 				{
 					onSession,
 				},

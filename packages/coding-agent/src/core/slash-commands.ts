@@ -117,6 +117,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		takesArgument: true,
 	},
 	{ name: "session", description: "Show session info" },
+	{ name: "sessions", description: "Browse and resume previous sessions" },
 	{ name: "system-prompt", description: "Show the exact system prompt sent to the model" },
 	{ name: "logs", description: "Show where daemon and client logs are saved" },
 	{

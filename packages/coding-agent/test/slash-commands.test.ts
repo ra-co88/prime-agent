@@ -21,6 +21,12 @@ describe("built-in slash commands", () => {
 		expect(commandNames).not.toContain("cron");
 	});
 
+	test("exposes a previous-session browser", () => {
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "sessions")).toMatchObject({
+			description: "Browse and resume previous sessions",
+		});
+	});
+
 	test("describes the fine-grained /rlm-max-depth semantics", () => {
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "rlm-max-depth")).toMatchObject({
 			description:
