@@ -1,0 +1,1 @@
+- Added `supervisorExitWhenIdleMinutes` setting so the daemon supervisor can self-terminate after a configurable period with no connected clients instead of running until a manual shutdown (default: off, preserving current behavior).

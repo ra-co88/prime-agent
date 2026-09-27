@@ -310,7 +310,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 		// An authoritative shutdown/update reason outranks the surviving direct link.
 		const closeReason = getDaemonSocketCloseReason(error);
-		if (closeReason === "shutdown") {
+		if (closeReason === "shutdown" || closeReason === "idle_exit") {
 			this.terminalCloseEmitted = true;
 			void this.emit({ type: "closed", error: this.formatDaemonSessionClosedError("shutdown") });
 			return;
@@ -360,7 +360,8 @@ export class DaemonAgentConnection implements AgentConnection {
 			connection.initialControlPlaneClose = undefined;
 			if (initialControlPlaneClose) {
 				// No listeners exist yet: a terminal close rejects the attach; the rest replays through the one handler.
-				if (getDaemonSocketCloseReason(initialControlPlaneClose) === "shutdown") {
+				const initialCloseReason = getDaemonSocketCloseReason(initialControlPlaneClose);
+				if (initialCloseReason === "shutdown" || initialCloseReason === "idle_exit") {
 					throw initialControlPlaneClose;
 				}
 				connection.handleTransportClose(initialControlPlaneClose);
@@ -1861,6 +1862,8 @@ export class DaemonAgentConnection implements AgentConnection {
 				"The daemon replaced this agent session with another session. Reopen the current session from Agents View.",
 			update:
 				"The Prime Agent daemon restarted for an update, but this window did not restore automatically. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
+			idle_exit:
+				"The Prime Agent daemon shut down after being idle, and this window did not restore automatically. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
 		};
 		return `${explanation[reason]} ${this.formatDaemonDiagnosticContext()}`;
 	}

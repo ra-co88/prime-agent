@@ -6742,7 +6742,7 @@ export class AgentDaemon {
 	}
 
 	private closeKeepsResumeEntry(reason: DaemonSessionClosedReason): boolean {
-		return reason === "shutdown" || reason === "update";
+		return reason === "shutdown" || reason === "update" || reason === "idle_exit";
 	}
 
 	private archiveSession(state: ActiveSessionState): void {
@@ -6771,7 +6771,7 @@ export class AgentDaemon {
 		}
 		if (reason === "killed") {
 			this.cancelScheduledJobsForSession(state);
-		} else if (reason !== "shutdown" && reason !== "update") {
+		} else if (reason !== "shutdown" && reason !== "update" && reason !== "idle_exit") {
 			this.cancelSubagentRlmHeartbeats(state);
 		}
 		// Abort in-flight status work before any await/dispose so it can't write
@@ -6795,7 +6795,13 @@ export class AgentDaemon {
 			}
 		}
 		cancelPendingExtensionUiRequests(state);
-		if (reason === "killed" || reason === "shutdown" || reason === "replaced" || reason === "update") {
+		if (
+			reason === "killed" ||
+			reason === "shutdown" ||
+			reason === "idle_exit" ||
+			reason === "replaced" ||
+			reason === "update"
+		) {
 			await this.abortBashForClose(state);
 		}
 		if (reason === "update") {
@@ -6806,7 +6812,7 @@ export class AgentDaemon {
 			if (waitForAbort) {
 				await abort;
 			}
-		} else if (reason === "shutdown" || reason === "replaced") {
+		} else if (reason === "shutdown" || reason === "idle_exit" || reason === "replaced") {
 			await state.runtime.session.abort().catch(() => undefined);
 		}
 		this.recordWorkerRecoveryState(state, `closed:${reason}`, false);

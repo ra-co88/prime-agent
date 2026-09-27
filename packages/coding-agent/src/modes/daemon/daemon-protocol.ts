@@ -1030,8 +1030,8 @@ export type DaemonErrorInfo =
 	| { code: "session_recovering"; activeSessionId: string }
 	| { code: "command_result_uncertain"; clientId: DaemonClientId; commandId: DaemonCommandId };
 
-export type DaemonSessionClosedReason = "killed" | "shutdown" | "completed" | "replaced" | "update";
-export type DaemonClosingReason = "shutdown" | "update";
+export type DaemonSessionClosedReason = "killed" | "shutdown" | "completed" | "replaced" | "update" | "idle_exit";
+export type DaemonClosingReason = "shutdown" | "update" | "idle_exit";
 
 export type DaemonExtensionUIResponse = { value: string } | { confirmed: boolean } | { cancelled: true };
 

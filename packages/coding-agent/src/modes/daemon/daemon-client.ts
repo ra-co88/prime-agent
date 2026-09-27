@@ -645,7 +645,10 @@ function isDaemonClosing(value: unknown): value is Extract<DaemonOutbound, { typ
 		return false;
 	}
 	const candidate = value as { type?: unknown; reason?: unknown };
-	return candidate.type === "daemon_closing" && (candidate.reason === "shutdown" || candidate.reason === "update");
+	return (
+		candidate.type === "daemon_closing" &&
+		(candidate.reason === "shutdown" || candidate.reason === "update" || candidate.reason === "idle_exit")
+	);
 }
 
 function isDaemonHello(value: unknown): value is DaemonHello {

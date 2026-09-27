@@ -224,6 +224,10 @@ const SCHEDULED_WAKE_MAX_TIMEOUT_MS = 2_147_483_647;
 const SCHEDULED_WAKE_CLIENT_ID = "scheduled-wake";
 const SUPERVISOR_CONFIG_FILE_NAME = "supervisor-config";
 const WORKER_STARTUP_GATE_FD = 3;
+// A supervisor that sits with zero connected clients pins RAM and socket files
+// until a manual `prime-agent shutdown`. The idle-exit timer self-terminates the
+// daemon once it has been clientless for the configured window; disabled by
+// default for backwards compatibility (settings.supervisorExitWhenIdleMinutes).
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
@@ -744,6 +748,8 @@ export class DaemonSupervisor {
 	private scheduledWakeRecompute?: Promise<void>;
 	private scheduledWakeRecomputeQueued = false;
 	private readonly scheduledWakeFailures = new Map<string, number>();
+	private supervisorIdleExitTimer?: ReturnType<typeof setTimeout>;
+	private lastClientDisconnectAt?: number;
 
 	constructor(
 		private readonly socketPath: string,
@@ -847,6 +853,10 @@ export class DaemonSupervisor {
 			}
 			this.scheduleIdleEvictionSweep();
 			this.scheduleScheduledSessionWakeRecompute();
+			if (this.clients.size === 0) {
+				this.lastClientDisconnectAt = Date.now();
+			}
+			this.scheduleSupervisorIdleExitCheck();
 			this.rosterWatchdogTimer = setInterval(() => this.sweepRosterStaleness(), ROSTER_WATCHDOG_INTERVAL_MS);
 			this.rosterWatchdogTimer.unref();
 			this.assertSocketLeaseHeld();
@@ -890,6 +900,51 @@ export class DaemonSupervisor {
 		if (!this.idleEvictionTimer) return;
 		clearTimeout(this.idleEvictionTimer);
 		this.idleEvictionTimer = undefined;
+	}
+
+	private clearSupervisorIdleExitTimer(): void {
+		if (!this.supervisorIdleExitTimer) return;
+		clearTimeout(this.supervisorIdleExitTimer);
+		this.supervisorIdleExitTimer = undefined;
+	}
+
+	/** True when no supervisor idle exit should be scheduled: disabled, mid-shutdown, or clients present. */
+	private supervisorIdleExitDelayMs(now = Date.now()): number | undefined {
+		const exitWhenIdleMinutes = this.settingsManager.getSupervisorExitWhenIdleMinutes();
+		if (exitWhenIdleMinutes === "off") return undefined;
+		if (this.clients.size > 0) return undefined;
+		// lastClientDisconnectAt is seeded at startup, so a daemon no client ever
+		// connected to still accumulates idle time instead of resetting each check.
+		const idleSince = this.lastClientDisconnectAt ?? now;
+		const elapsedMs = now - idleSince;
+		const thresholdMs = exitWhenIdleMinutes * 60_000;
+		if (elapsedMs >= thresholdMs) return 0;
+		return thresholdMs - elapsedMs;
+	}
+
+	private scheduleSupervisorIdleExitCheck(): void {
+		if (this.shuttingDown || this.supervisorIdleExitTimer) return;
+		const delayMs = this.supervisorIdleExitDelayMs();
+		if (delayMs === undefined) return;
+		this.supervisorIdleExitTimer = setTimeout(() => {
+			this.supervisorIdleExitTimer = undefined;
+			this.checkSupervisorIdleExit();
+		}, delayMs);
+		this.supervisorIdleExitTimer.unref();
+	}
+
+	private checkSupervisorIdleExit(): void {
+		if (this.shuttingDown) return;
+		const delayMs = this.supervisorIdleExitDelayMs();
+		if (delayMs === undefined) return;
+		if (delayMs > 0) {
+			this.scheduleSupervisorIdleExitCheck();
+			return;
+		}
+		this.log(
+			`Supervisor idle for ${this.settingsManager.getSupervisorExitWhenIdleMinutes()} minutes with no connected clients; shutting down`,
+		);
+		void this.shutdown(0, true, false, false, "idle_exit");
 	}
 
 	private clearRosterWatchdogTimer(): void {
@@ -1446,6 +1501,8 @@ export class DaemonSupervisor {
 		this.sessionInputPauseEpochs.set(client, 0);
 		this.detachingInputPauseSessions.set(client, new Set());
 		this.clients.add(client);
+		this.lastClientDisconnectAt = undefined;
+		this.clearSupervisorIdleExitTimer();
 		void this.ready.then(
 			() => {
 				if (!client.socket.destroyed && this.clients.has(client)) {
@@ -1491,6 +1548,13 @@ export class DaemonSupervisor {
 				void this.evictEmptySessionOnLastDetach(activeSessionId);
 			}
 			this.scheduleOwnedWorkerCleanupForClient(this.protocolClientId(client));
+			if (this.clients.size === 0) {
+				this.lastClientDisconnectAt = Date.now();
+				// Admission test doubles omit settingsManager; idle exit is then inert.
+				if (this.settingsManager) {
+					this.scheduleSupervisorIdleExitCheck();
+				}
+			}
 		};
 		socket.on("close", cleanup);
 		socket.on("error", cleanup);
@@ -6930,6 +6994,7 @@ export class DaemonSupervisor {
 		}
 		this.shuttingDown = true;
 		this.clearIdleEvictionTimer();
+		this.clearSupervisorIdleExitTimer();
 		this.clearScheduledWakeTimer();
 		this.clearRosterWatchdogTimer();
 		await this.idleEvictionSweep?.catch(() => undefined);

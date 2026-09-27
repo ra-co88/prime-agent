@@ -138,6 +138,7 @@ export interface Settings {
 	defaultServiceTier?: ServiceTier;
 	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 2
 	idleEvictionMinutes?: number | "off"; // global daemon policy; default: 90
+	supervisorExitWhenIdleMinutes?: number | "off"; // daemon self-termination after no connected clients; default: off
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
@@ -812,6 +813,21 @@ export class SettingsManager {
 		}
 		this.globalSettings.idleEvictionMinutes = value;
 		this.markModified("idleEvictionMinutes");
+		this.save();
+	}
+
+	getSupervisorExitWhenIdleMinutes(): number | "off" {
+		const value: unknown = this.globalSettings.supervisorExitWhenIdleMinutes;
+		if (value === "off" || value === "none") return "off";
+		return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : "off";
+	}
+
+	setSupervisorExitWhenIdleMinutes(value: number | "off"): void {
+		if (value !== "off" && (!Number.isFinite(value) || value <= 0)) {
+			throw new Error("Supervisor exit-when-idle minutes must be a positive number or off");
+		}
+		this.globalSettings.supervisorExitWhenIdleMinutes = value;
+		this.markModified("supervisorExitWhenIdleMinutes");
 		this.save();
 	}
 

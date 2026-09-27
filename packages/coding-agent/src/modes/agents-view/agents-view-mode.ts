@@ -253,7 +253,7 @@ export function combineAgentsViewStartupNotices(...notices: readonly (string | u
 }
 
 export function shouldReconnectAgentsViewDaemon(reason: DaemonClosingReason | undefined): boolean {
-	return reason !== "shutdown";
+	return reason !== "shutdown" && reason !== "idle_exit";
 }
 
 export function createAgentsViewReplyHeadline(text: string | undefined): string | undefined {
